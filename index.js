@@ -8,12 +8,18 @@ const PORT = process.env.PORT || 3000;
 // ─── yt-dlp — python3 for Linux/Render ───────────────────────
 const YTDLP = 'python3 -m yt_dlp';
 
+// ─── User Agent — Bot detection se bachne ke liye ─────────────
+const UA = '--user-agent "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36"';
+
+// ─── Common flags ─────────────────────────────────────────────
+const FLAGS = `${UA} --no-warnings --no-check-certificates`;
+
 app.use(cors());
 app.use(express.json());
 
 // ─── TEST ─────────────────────────────────────────────────────
 app.get('/', (req, res) => {
-  res.json({ status: 'NexGenGold Server Running! 🔥', version: '1.0.0' });
+  res.json({ status: 'NexGenGold Server Running! 🔥', version: '2.0.0' });
 });
 
 // ─── SEARCH ───────────────────────────────────────────────────
@@ -23,7 +29,7 @@ app.get('/search', (req, res) => {
   if (!query) return res.status(400).json({ error: 'Query required' });
   console.log(`🔍 Searching: ${query}`);
 
-  const cmd = `${YTDLP} "ytsearch${limit}:${query}" --dump-json --flat-playlist --no-warnings`;
+  const cmd = `${YTDLP} ${FLAGS} "ytsearch${limit}:${query}" --dump-json --flat-playlist`;
 
   exec(cmd, { maxBuffer: 1024 * 1024 * 10, timeout: 30000 }, (error, stdout) => {
     if (error) {
@@ -58,7 +64,8 @@ app.get('/info', (req, res) => {
   const url = req.query.url;
   if (!url) return res.status(400).json({ error: 'URL required' });
 
-  const cmd = `${YTDLP} "${url}" --dump-json --no-warnings`;
+  const cmd = `${YTDLP} ${FLAGS} "${url}" --dump-json`;
+
   exec(cmd, { maxBuffer: 1024 * 1024 * 10, timeout: 30000 }, (error, stdout) => {
     if (error) return res.status(500).json({ error: 'Info fetch failed' });
     try {
@@ -95,22 +102,31 @@ app.get('/download', (req, res) => {
 
   if (type === 'audio') {
     // Audio only
-    formatArg = `-f "bestaudio"`;
+    formatArg = `-f "bestaudio[ext=m4a]/bestaudio/best"`;
   } else if (quality && quality !== 'undefined' && quality !== '' && !isNaN(parseInt(quality))) {
     // Video with specific quality
     const q = parseInt(quality);
-    formatArg = `-f "bestvideo[height<=${q}]+bestaudio/best[height<=${q}]/best"`;
+    formatArg = `-f "bestvideo[height<=${q}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=${q}]+bestaudio/best[height<=${q}]/best"`;
   } else {
     // Default best quality
-    formatArg = `-f "bestvideo+bestaudio/best"`;
+    formatArg = `-f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"`;
   }
 
-  const cmd = `${YTDLP} ${formatArg} --get-url --no-warnings "${url}"`;
+  const cmd = `${YTDLP} ${FLAGS} ${formatArg} --get-url "${url}"`;
 
-  exec(cmd, { maxBuffer: 1024 * 1024 * 5, timeout: 30000 }, (error, stdout) => {
+  exec(cmd, { maxBuffer: 1024 * 1024 * 5, timeout: 30000 }, (error, stdout, stderr) => {
     if (error) {
       console.error('Download error:', error.message);
-      return res.status(500).json({ error: 'Could not get download URL', details: error.message });
+      // Try fallback with simpler format
+      const fallbackCmd = `${YTDLP} ${FLAGS} -f "best" --get-url "${url}"`;
+      exec(fallbackCmd, { maxBuffer: 1024 * 1024 * 5, timeout: 30000 }, (err2, stdout2) => {
+        if (err2) return res.status(500).json({ error: 'Download failed', details: err2.message });
+        const lines2 = stdout2.trim().split('\n').filter(l => l.trim() && l.startsWith('http'));
+        if (lines2.length === 0) return res.status(500).json({ error: 'No URL found' });
+        console.log(`✅ Download URL ready (fallback)`);
+        res.json({ success: true, downloadUrl: lines2[0] });
+      });
+      return;
     }
     const lines = stdout.trim().split('\n').filter(l => l.trim() && l.startsWith('http'));
     if (lines.length === 0) return res.status(500).json({ error: 'No URL found' });
@@ -123,8 +139,7 @@ app.get('/download', (req, res) => {
 app.get('/trending', (req, res) => {
   console.log('🔥 Getting trending...');
 
-  // Use search as trending (YouTube feed blocked on free servers)
-  const cmd = `${YTDLP} "ytsearch15:Pakistan trending songs 2025" --dump-json --flat-playlist --no-warnings`;
+  const cmd = `${YTDLP} ${FLAGS} "ytsearch15:Pakistan trending songs 2025" --dump-json --flat-playlist`;
 
   exec(cmd, { maxBuffer: 1024 * 1024 * 20, timeout: 45000 }, (error, stdout) => {
     if (error) {
@@ -184,9 +199,10 @@ function formatDate(d) {
 app.listen(PORT, () => {
   console.log(`
   ╔══════════════════════════════════╗
-  ║   NexGenGold Server Started! 🔥  ║
+  ║   NexGenGold Server v2.0 🔥      ║
   ║   Port: ${PORT}                     ║
-  ║   yt-dlp: python3 -m yt_dlp ✅   ║
+  ║   Bot fix: ✅ User Agent added   ║
+  ║   Fallback: ✅ Auto retry        ║
   ╚══════════════════════════════════╝
   → GET /              Test server
   → GET /search?q=...  Search videos
