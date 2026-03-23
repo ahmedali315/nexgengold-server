@@ -7,12 +7,12 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ─── YouTube API Key ──────────────────────────────────────────
-const YT_API_KEY = process.env.YT_API_KEY || 'AIzaSyCRByNqSgqg0eLCu22GJDBOi8Im2IkTI1w';
+const YT_API_KEY = process.env.YT_API_KEY || '';
 
-// ─── yt-dlp — sirf download ke liye ─────────────────────────
+// ─── yt-dlp — sirf download ke liye ──────────────────────────
 const YTDLP = 'python3 -m yt_dlp';
 const UA = '--user-agent "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36"';
-const FLAGS = `${UA} --no-warnings --no-check-certificates`;
+const FLAGS = `${UA} --no-warnings --no-check-certificates --cookies /etc/secrets/cookies.txt`;
 
 app.use(cors());
 app.use(express.json());
@@ -65,7 +65,7 @@ function formatDate(d) {
   return `${Math.floor(diff/365)} years ago`;
 }
 
-function formatDurationOld(s) {
+function formatDurationSec(s) {
   if (!s) return '0:00';
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
   if (h > 0) return `${h}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
@@ -74,7 +74,12 @@ function formatDurationOld(s) {
 
 // ─── TEST ─────────────────────────────────────────────────────
 app.get('/', (req, res) => {
-  res.json({ status: 'NexGenGold Server Running! 🔥', version: '3.0.0', search: 'YouTube API ✅', download: 'yt-dlp ✅' });
+  res.json({
+    status: 'NexGenGold Server Running! 🔥',
+    version: '3.1.0',
+    search: 'YouTube API ✅',
+    download: 'yt-dlp + cookies ✅'
+  });
 });
 
 // ─── SEARCH — YouTube API ─────────────────────────────────────
@@ -85,22 +90,21 @@ app.get('/search', async (req, res) => {
   console.log(`🔍 Searching: ${query}`);
 
   try {
-    // Step 1: Search videos
+    // Step 1: Search
     const searchData = await ytApiGet(
-      `search?part=snippet&q=${encodeURIComponent(query)}&type=video&maxResults=${limit}&regionCode=PK&relevanceLanguage=ur`
+      `search?part=snippet&q=${encodeURIComponent(query)}&type=video&maxResults=${limit}&regionCode=PK`
     );
 
     if (!searchData.items || searchData.items.length === 0) {
       return res.json({ success: true, results: [] });
     }
 
-    // Step 2: Get video details (duration + views)
+    // Step 2: Get details
     const ids = searchData.items.map(i => i.id.videoId).join(',');
     const detailData = await ytApiGet(
       `videos?part=contentDetails,statistics&id=${ids}`
     );
 
-    // Map details by ID
     const details = {};
     (detailData.items || []).forEach(item => {
       details[item.id] = {
@@ -118,7 +122,7 @@ app.get('/search', async (req, res) => {
         channel: snippet.channelTitle || 'Unknown',
         duration: details[id]?.duration || '0:00',
         views: details[id]?.views || '0',
-        thumbnail: snippet.thumbnails?.high?.url || snippet.thumbnails?.default?.url || `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
+        thumbnail: snippet.thumbnails?.high?.url || `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
         uploadDate: formatDate(snippet.publishedAt),
         url: `https://www.youtube.com/watch?v=${id}`,
       };
@@ -137,9 +141,8 @@ app.get('/trending', async (req, res) => {
   console.log('🔥 Getting trending...');
 
   try {
-    // Trending videos for Pakistan
     const trendData = await ytApiGet(
-      `videos?part=snippet,contentDetails,statistics&chart=mostPopular&regionCode=PK&maxResults=15&videoCategoryId=0`
+      `videos?part=snippet,contentDetails,statistics&chart=mostPopular&regionCode=PK&maxResults=15`
     );
 
     if (!trendData.items || trendData.items.length === 0) {
@@ -187,14 +190,14 @@ app.get('/info', (req, res) => {
         formats.sort((a, b) => b.height - a.height);
       }
       formats.push({ label: 'MP3 Audio', height: 0, ext: 'mp3' });
-      res.json({ success: true, video: { id: d.id, title: d.title, channel: d.uploader || d.channel, duration: formatDurationOld(d.duration), views: formatViews(d.view_count), thumbnail: d.thumbnail, uploadDate: 'Unknown', formats } });
+      res.json({ success: true, video: { id: d.id, title: d.title, channel: d.uploader || d.channel, duration: formatDurationSec(d.duration), views: formatViews(d.view_count), thumbnail: d.thumbnail, uploadDate: 'Unknown', formats } });
     } catch (e) {
       res.status(500).json({ error: 'Parse failed' });
     }
   });
 });
 
-// ─── DOWNLOAD URL — yt-dlp ────────────────────────────────────
+// ─── DOWNLOAD URL — yt-dlp + cookies ─────────────────────────
 app.get('/download', (req, res) => {
   const url = req.query.url;
   const quality = req.query.quality;
@@ -214,14 +217,18 @@ app.get('/download', (req, res) => {
   }
 
   const cmd = `${YTDLP} ${FLAGS} ${formatArg} --get-url "${url}"`;
+  console.log(`Running: ${cmd}`);
 
   exec(cmd, { maxBuffer: 1024 * 1024 * 5, timeout: 30000 }, (error, stdout) => {
     if (error) {
       console.error('Download error:', error.message);
-      // Fallback
+      // Fallback — simpler format
       const fallback = `${YTDLP} ${FLAGS} -f "best" --get-url "${url}"`;
       exec(fallback, { maxBuffer: 1024 * 1024 * 5, timeout: 30000 }, (err2, stdout2) => {
-        if (err2) return res.status(500).json({ error: 'Download failed', details: err2.message });
+        if (err2) {
+          console.error('Fallback error:', err2.message);
+          return res.status(500).json({ error: 'Download failed', details: err2.message });
+        }
         const lines = stdout2.trim().split('\n').filter(l => l.trim() && l.startsWith('http'));
         if (lines.length === 0) return res.status(500).json({ error: 'No URL found' });
         console.log(`✅ Download URL ready (fallback)`);
@@ -240,11 +247,11 @@ app.get('/download', (req, res) => {
 app.listen(PORT, () => {
   console.log(`
   ╔══════════════════════════════════════╗
-  ║   NexGenGold Server v3.0 🔥          ║
+  ║   NexGenGold Server v3.1 🔥          ║
   ║   Port: ${PORT}                         ║
   ║   Search:   YouTube API v3 ✅        ║
   ║   Trending: YouTube API v3 ✅        ║
-  ║   Download: yt-dlp ✅                ║
+  ║   Download: yt-dlp + cookies ✅      ║
   ╚══════════════════════════════════════╝
   → GET /              Test server
   → GET /search?q=...  Search videos
