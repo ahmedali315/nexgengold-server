@@ -2,6 +2,8 @@ const express = require('express');
 const cors = require('cors');
 const { exec } = require('child_process');
 const https = require('https');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -9,10 +11,37 @@ const PORT = process.env.PORT || 3000;
 // ─── YouTube API Key ──────────────────────────────────────────
 const YT_API_KEY = process.env.YT_API_KEY || '';
 
-// ─── yt-dlp — sirf download ke liye ──────────────────────────
+// ─── Cookies — copy to writable location ─────────────────────
+const COOKIES_SRC = '/etc/secrets/cookies.txt';
+const COOKIES_DST = '/tmp/cookies.txt';
+
+function setupCookies() {
+  try {
+    if (fs.existsSync(COOKIES_SRC)) {
+      fs.copyFileSync(COOKIES_SRC, COOKIES_DST);
+      fs.chmodSync(COOKIES_DST, 0o666);
+      console.log('✅ Cookies copied to /tmp/cookies.txt');
+    } else {
+      console.log('⚠️ No cookies file found');
+    }
+  } catch (e) {
+    console.log('⚠️ Cookies setup error:', e.message);
+  }
+}
+
+// Setup cookies on start
+setupCookies();
+
+// ─── yt-dlp flags ─────────────────────────────────────────────
 const YTDLP = 'python3 -m yt_dlp';
 const UA = '--user-agent "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36"';
-const FLAGS = `${UA} --no-warnings --no-check-certificates --cookies /etc/secrets/cookies.txt`;
+
+function getFlags() {
+  // Always re-copy cookies before use
+  setupCookies();
+  const cookieFlag = fs.existsSync(COOKIES_DST) ? `--cookies ${COOKIES_DST}` : '';
+  return `${UA} --no-warnings --no-check-certificates ${cookieFlag}`;
+}
 
 app.use(cors());
 app.use(express.json());
@@ -76,9 +105,10 @@ function formatDurationSec(s) {
 app.get('/', (req, res) => {
   res.json({
     status: 'NexGenGold Server Running! 🔥',
-    version: '3.1.0',
+    version: '3.2.0',
     search: 'YouTube API ✅',
-    download: 'yt-dlp + cookies ✅'
+    download: 'yt-dlp + cookies ✅',
+    cookies: fs.existsSync(COOKIES_DST) ? 'loaded ✅' : 'not found ⚠️'
   });
 });
 
@@ -90,7 +120,6 @@ app.get('/search', async (req, res) => {
   console.log(`🔍 Searching: ${query}`);
 
   try {
-    // Step 1: Search
     const searchData = await ytApiGet(
       `search?part=snippet&q=${encodeURIComponent(query)}&type=video&maxResults=${limit}&regionCode=PK`
     );
@@ -99,7 +128,6 @@ app.get('/search', async (req, res) => {
       return res.json({ success: true, results: [] });
     }
 
-    // Step 2: Get details
     const ids = searchData.items.map(i => i.id.videoId).join(',');
     const detailData = await ytApiGet(
       `videos?part=contentDetails,statistics&id=${ids}`
@@ -139,7 +167,6 @@ app.get('/search', async (req, res) => {
 // ─── TRENDING — YouTube API ───────────────────────────────────
 app.get('/trending', async (req, res) => {
   console.log('🔥 Getting trending...');
-
   try {
     const trendData = await ytApiGet(
       `videos?part=snippet,contentDetails,statistics&chart=mostPopular&regionCode=PK&maxResults=15`
@@ -173,6 +200,7 @@ app.get('/info', (req, res) => {
   const url = req.query.url;
   if (!url) return res.status(400).json({ error: 'URL required' });
 
+  const FLAGS = getFlags();
   const cmd = `${YTDLP} ${FLAGS} "${url}" --dump-json`;
   exec(cmd, { maxBuffer: 1024 * 1024 * 10, timeout: 30000 }, (error, stdout) => {
     if (error) return res.status(500).json({ error: 'Info fetch failed' });
@@ -206,6 +234,8 @@ app.get('/download', (req, res) => {
   if (!url) return res.status(400).json({ error: 'URL required' });
   console.log(`⬇️ Download: quality=${quality} type=${type}`);
 
+  const FLAGS = getFlags();
+
   let formatArg = '';
   if (type === 'audio') {
     formatArg = `-f "bestaudio[ext=m4a]/bestaudio/best"`;
@@ -217,12 +247,12 @@ app.get('/download', (req, res) => {
   }
 
   const cmd = `${YTDLP} ${FLAGS} ${formatArg} --get-url "${url}"`;
-  console.log(`Running: ${cmd}`);
+  console.log(`CMD: ${cmd}`);
 
   exec(cmd, { maxBuffer: 1024 * 1024 * 5, timeout: 30000 }, (error, stdout) => {
     if (error) {
       console.error('Download error:', error.message);
-      // Fallback — simpler format
+      // Fallback
       const fallback = `${YTDLP} ${FLAGS} -f "best" --get-url "${url}"`;
       exec(fallback, { maxBuffer: 1024 * 1024 * 5, timeout: 30000 }, (err2, stdout2) => {
         if (err2) {
@@ -247,16 +277,11 @@ app.get('/download', (req, res) => {
 app.listen(PORT, () => {
   console.log(`
   ╔══════════════════════════════════════╗
-  ║   NexGenGold Server v3.1 🔥          ║
+  ║   NexGenGold Server v3.2 🔥          ║
   ║   Port: ${PORT}                         ║
   ║   Search:   YouTube API v3 ✅        ║
   ║   Trending: YouTube API v3 ✅        ║
   ║   Download: yt-dlp + cookies ✅      ║
   ╚══════════════════════════════════════╝
-  → GET /              Test server
-  → GET /search?q=...  Search videos
-  → GET /info?url=...  Video info
-  → GET /download?...  Download URL
-  → GET /trending      Trending videos
   `);
 });
