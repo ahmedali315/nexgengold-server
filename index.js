@@ -3,285 +3,197 @@ const cors = require('cors');
 const { exec } = require('child_process');
 const https = require('https');
 const fs = require('fs');
-const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ─── YouTube API Key ──────────────────────────────────────────
 const YT_API_KEY = process.env.YT_API_KEY || '';
-
-// ─── Cookies — copy to writable location ─────────────────────
 const COOKIES_SRC = '/etc/secrets/cookies.txt';
-const COOKIES_DST = '/tmp/cookies.txt';
+const COOKIES_DST = '/tmp/yt_cookies.txt';
+const YTDLP = 'python3 -m yt_dlp';
+const UA = 'Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36';
 
 function setupCookies() {
   try {
     if (fs.existsSync(COOKIES_SRC)) {
       fs.copyFileSync(COOKIES_SRC, COOKIES_DST);
       fs.chmodSync(COOKIES_DST, 0o666);
-      console.log('✅ Cookies copied to /tmp/cookies.txt');
-    } else {
-      console.log('⚠️ No cookies file found');
+      console.log('✅ Cookies ready');
+      return true;
     }
-  } catch (e) {
-    console.log('⚠️ Cookies setup error:', e.message);
-  }
+  } catch (e) { console.log('Cookies error:', e.message); }
+  return false;
 }
-
-// Setup cookies on start
 setupCookies();
 
-// ─── yt-dlp flags ─────────────────────────────────────────────
-const YTDLP = 'python3 -m yt_dlp';
-const UA = '--user-agent "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36"';
-
 function getFlags() {
-  // Always re-copy cookies before use
   setupCookies();
-  const cookieFlag = fs.existsSync(COOKIES_DST) ? `--cookies ${COOKIES_DST}` : '';
-  return `${UA} --no-warnings --no-check-certificates ${cookieFlag}`;
+  const c = fs.existsSync(COOKIES_DST) ? `--cookies ${COOKIES_DST}` : '';
+  return `--user-agent "${UA}" --no-warnings --no-check-certificates ${c}`;
 }
 
 app.use(cors());
 app.use(express.json());
 
-// ─── Helper: YouTube API call ─────────────────────────────────
 function ytApiGet(path) {
   return new Promise((resolve, reject) => {
-    const url = `https://www.googleapis.com/youtube/v3/${path}&key=${YT_API_KEY}`;
-    https.get(url, (res) => {
+    https.get(`https://www.googleapis.com/youtube/v3/${path}&key=${YT_API_KEY}`, (res) => {
       let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => {
-        try { resolve(JSON.parse(data)); }
-        catch (e) { reject(e); }
-      });
+      res.on('data', c => data += c);
+      res.on('end', () => { try { resolve(JSON.parse(data)); } catch(e) { reject(e); } });
     }).on('error', reject);
   });
 }
 
-// ─── Format helpers ───────────────────────────────────────────
-function formatDuration(iso) {
+function fmtDur(iso) {
   if (!iso) return '0:00';
-  const match = iso.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
-  if (!match) return '0:00';
-  const h = parseInt(match[1] || 0);
-  const m = parseInt(match[2] || 0);
-  const s = parseInt(match[3] || 0);
-  if (h > 0) return `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
-  return `${m}:${String(s).padStart(2,'0')}`;
+  const m = iso.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
+  if (!m) return '0:00';
+  const h=parseInt(m[1]||0), mn=parseInt(m[2]||0), s=parseInt(m[3]||0);
+  if (h>0) return `${h}:${String(mn).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+  return `${mn}:${String(s).padStart(2,'0')}`;
 }
-
-function formatViews(v) {
-  if (!v) return '0';
-  const n = parseInt(v);
-  if (n >= 1e9) return `${(n/1e9).toFixed(1)}B`;
-  if (n >= 1e6) return `${(n/1e6).toFixed(1)}M`;
-  if (n >= 1e3) return `${(n/1e3).toFixed(0)}K`;
+function fmtDurSec(s) {
+  if (!s) return '0:00';
+  const h=Math.floor(s/3600), m=Math.floor((s%3600)/60), sec=s%60;
+  if (h>0) return `${h}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
+  return `${m}:${String(sec).padStart(2,'0')}`;
+}
+function fmtViews(v) {
+  if (!v) return '0'; const n=parseInt(v);
+  if (n>=1e9) return `${(n/1e9).toFixed(1)}B`;
+  if (n>=1e6) return `${(n/1e6).toFixed(1)}M`;
+  if (n>=1e3) return `${(n/1e3).toFixed(0)}K`;
   return String(n);
 }
-
-function formatDate(d) {
+function fmtDate(d) {
   if (!d) return 'Recent';
-  const date = new Date(d);
-  const diff = Math.floor((Date.now() - date) / 86400000);
-  if (diff === 0) return 'Today';
-  if (diff < 2) return '1 day ago';
-  if (diff < 7) return `${diff} days ago`;
-  if (diff < 30) return `${Math.floor(diff/7)} weeks ago`;
-  if (diff < 365) return `${Math.floor(diff/30)} months ago`;
+  const diff=Math.floor((Date.now()-new Date(d))/86400000);
+  if (diff===0) return 'Today'; if (diff<2) return '1 day ago';
+  if (diff<7) return `${diff} days ago`; if (diff<30) return `${Math.floor(diff/7)} weeks ago`;
+  if (diff<365) return `${Math.floor(diff/30)} months ago`;
   return `${Math.floor(diff/365)} years ago`;
 }
 
-function formatDurationSec(s) {
-  if (!s) return '0:00';
-  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
-  if (h > 0) return `${h}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
-  return `${m}:${String(sec).padStart(2,'0')}`;
-}
+app.get('/', (req, res) => res.json({
+  status: 'NexGenGold Server Running! 🔥', version: '3.3.0',
+  cookies: fs.existsSync(COOKIES_DST) ? 'loaded ✅' : 'missing ⚠️'
+}));
 
-// ─── TEST ─────────────────────────────────────────────────────
-app.get('/', (req, res) => {
-  res.json({
-    status: 'NexGenGold Server Running! 🔥',
-    version: '3.2.0',
-    search: 'YouTube API ✅',
-    download: 'yt-dlp + cookies ✅',
-    cookies: fs.existsSync(COOKIES_DST) ? 'loaded ✅' : 'not found ⚠️'
-  });
-});
-
-// ─── SEARCH — YouTube API ─────────────────────────────────────
 app.get('/search', async (req, res) => {
   const query = req.query.q;
   const limit = parseInt(req.query.limit) || 10;
   if (!query) return res.status(400).json({ error: 'Query required' });
   console.log(`🔍 Searching: ${query}`);
-
   try {
-    const searchData = await ytApiGet(
-      `search?part=snippet&q=${encodeURIComponent(query)}&type=video&maxResults=${limit}&regionCode=PK`
-    );
-
-    if (!searchData.items || searchData.items.length === 0) {
-      return res.json({ success: true, results: [] });
-    }
-
-    const ids = searchData.items.map(i => i.id.videoId).join(',');
-    const detailData = await ytApiGet(
-      `videos?part=contentDetails,statistics&id=${ids}`
-    );
-
-    const details = {};
-    (detailData.items || []).forEach(item => {
-      details[item.id] = {
-        duration: formatDuration(item.contentDetails?.duration),
-        views: formatViews(item.statistics?.viewCount),
-      };
+    const s = await ytApiGet(`search?part=snippet&q=${encodeURIComponent(query)}&type=video&maxResults=${limit}&regionCode=PK`);
+    if (!s.items?.length) return res.json({ success: true, results: [] });
+    const ids = s.items.map(i => i.id.videoId).join(',');
+    const d = await ytApiGet(`videos?part=contentDetails,statistics&id=${ids}`);
+    const det = {};
+    (d.items||[]).forEach(i => { det[i.id] = { duration: fmtDur(i.contentDetails?.duration), views: fmtViews(i.statistics?.viewCount) }; });
+    const results = s.items.map(i => {
+      const id = i.id.videoId, sn = i.snippet;
+      return { id, title: sn.title||'Unknown', channel: sn.channelTitle||'Unknown', duration: det[id]?.duration||'0:00', views: det[id]?.views||'0', thumbnail: sn.thumbnails?.high?.url||`https://i.ytimg.com/vi/${id}/hqdefault.jpg`, uploadDate: fmtDate(sn.publishedAt), url: `https://www.youtube.com/watch?v=${id}` };
     });
-
-    const results = searchData.items.map(item => {
-      const id = item.id.videoId;
-      const snippet = item.snippet;
-      return {
-        id,
-        title: snippet.title || 'Unknown',
-        channel: snippet.channelTitle || 'Unknown',
-        duration: details[id]?.duration || '0:00',
-        views: details[id]?.views || '0',
-        thumbnail: snippet.thumbnails?.high?.url || `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
-        uploadDate: formatDate(snippet.publishedAt),
-        url: `https://www.youtube.com/watch?v=${id}`,
-      };
-    });
-
     console.log(`✅ Found ${results.length} results`);
     res.json({ success: true, results });
-  } catch (e) {
-    console.error('Search error:', e.message);
-    res.status(500).json({ error: 'Search failed', details: e.message });
-  }
+  } catch(e) { console.error('Search:', e.message); res.status(500).json({ error: 'Search failed' }); }
 });
 
-// ─── TRENDING — YouTube API ───────────────────────────────────
 app.get('/trending', async (req, res) => {
-  console.log('🔥 Getting trending...');
+  console.log('🔥 Trending...');
   try {
-    const trendData = await ytApiGet(
-      `videos?part=snippet,contentDetails,statistics&chart=mostPopular&regionCode=PK&maxResults=15`
-    );
-
-    if (!trendData.items || trendData.items.length === 0) {
-      return res.json({ success: true, results: [] });
-    }
-
-    const results = trendData.items.map(item => ({
-      id: item.id,
-      title: item.snippet?.title || 'Unknown',
-      channel: item.snippet?.channelTitle || 'Unknown',
-      duration: formatDuration(item.contentDetails?.duration),
-      views: formatViews(item.statistics?.viewCount),
-      thumbnail: item.snippet?.thumbnails?.high?.url || `https://i.ytimg.com/vi/${item.id}/hqdefault.jpg`,
-      uploadDate: formatDate(item.snippet?.publishedAt),
-      url: `https://www.youtube.com/watch?v=${item.id}`,
+    const t = await ytApiGet(`videos?part=snippet,contentDetails,statistics&chart=mostPopular&regionCode=PK&maxResults=15`);
+    if (!t.items?.length) return res.json({ success: true, results: [] });
+    const results = t.items.map(i => ({
+      id: i.id, title: i.snippet?.title||'Unknown', channel: i.snippet?.channelTitle||'Unknown',
+      duration: fmtDur(i.contentDetails?.duration), views: fmtViews(i.statistics?.viewCount),
+      thumbnail: i.snippet?.thumbnails?.high?.url||`https://i.ytimg.com/vi/${i.id}/hqdefault.jpg`,
+      uploadDate: fmtDate(i.snippet?.publishedAt), url: `https://www.youtube.com/watch?v=${i.id}`
     }));
-
-    console.log(`✅ Trending: ${results.length} results`);
+    console.log(`✅ Trending: ${results.length}`);
     res.json({ success: true, results });
-  } catch (e) {
-    console.error('Trending error:', e.message);
-    res.json({ success: true, results: [] });
-  }
+  } catch(e) { res.json({ success: true, results: [] }); }
 });
 
-// ─── VIDEO INFO ───────────────────────────────────────────────
 app.get('/info', (req, res) => {
   const url = req.query.url;
   if (!url) return res.status(400).json({ error: 'URL required' });
-
-  const FLAGS = getFlags();
-  const cmd = `${YTDLP} ${FLAGS} "${url}" --dump-json`;
-  exec(cmd, { maxBuffer: 1024 * 1024 * 10, timeout: 30000 }, (error, stdout) => {
-    if (error) return res.status(500).json({ error: 'Info fetch failed' });
+  const cmd = `${YTDLP} ${getFlags()} "${url}" --dump-json`;
+  exec(cmd, { maxBuffer: 1024*1024*10, timeout: 30000 }, (err, out) => {
+    if (err) return res.status(500).json({ error: 'Info failed' });
     try {
-      const d = JSON.parse(stdout);
-      const formats = [];
-      if (d.formats) {
-        const seen = new Set();
-        d.formats.forEach(f => {
-          if (f.height && !seen.has(f.height)) {
-            seen.add(f.height);
-            formats.push({ label: f.height >= 2160 ? '4K' : `${f.height}p`, height: f.height, ext: f.ext || 'mp4' });
-          }
-        });
-        formats.sort((a, b) => b.height - a.height);
-      }
+      const d = JSON.parse(out);
+      const formats = [], seen = new Set();
+      (d.formats||[]).forEach(f => { if (f.height && !seen.has(f.height)) { seen.add(f.height); formats.push({ label: f.height>=2160?'4K':`${f.height}p`, height: f.height, ext: f.ext||'mp4' }); } });
+      formats.sort((a,b)=>b.height-a.height);
       formats.push({ label: 'MP3 Audio', height: 0, ext: 'mp3' });
-      res.json({ success: true, video: { id: d.id, title: d.title, channel: d.uploader || d.channel, duration: formatDurationSec(d.duration), views: formatViews(d.view_count), thumbnail: d.thumbnail, uploadDate: 'Unknown', formats } });
-    } catch (e) {
-      res.status(500).json({ error: 'Parse failed' });
-    }
+      res.json({ success: true, video: { id: d.id, title: d.title, channel: d.uploader||d.channel, duration: fmtDurSec(d.duration), views: fmtViews(d.view_count), thumbnail: d.thumbnail, formats } });
+    } catch(e) { res.status(500).json({ error: 'Parse failed' }); }
   });
 });
 
-// ─── DOWNLOAD URL — yt-dlp + cookies ─────────────────────────
+// ─── DOWNLOAD — Simple format, multiple fallbacks ─────────────
 app.get('/download', (req, res) => {
-  const url = req.query.url;
-  const quality = req.query.quality;
-  const type = req.query.type;
-
+  const { url, quality, type } = req.query;
   if (!url) return res.status(400).json({ error: 'URL required' });
   console.log(`⬇️ Download: quality=${quality} type=${type}`);
 
   const FLAGS = getFlags();
 
-  let formatArg = '';
+  // Format list — try each one until success
+  let formats = [];
   if (type === 'audio') {
-    formatArg = `-f "bestaudio[ext=m4a]/bestaudio/best"`;
-  } else if (quality && quality !== 'undefined' && quality !== '' && !isNaN(parseInt(quality))) {
-    const q = parseInt(quality);
-    formatArg = `-f "bestvideo[height<=${q}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=${q}]+bestaudio/best[height<=${q}]/best"`;
+    formats = [
+      `bestaudio`,
+      `worstaudio`,
+      `best`,
+    ];
   } else {
-    formatArg = `-f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"`;
+    const q = (quality && quality !== 'undefined') ? parseInt(quality) : 720;
+    formats = [
+      `best[height<=${q}]`,
+      `best[height<=480]`,
+      `best[height<=360]`,
+      `best`,
+      `worst`,
+    ];
   }
 
-  const cmd = `${YTDLP} ${FLAGS} ${formatArg} --get-url "${url}"`;
-  console.log(`CMD: ${cmd}`);
-
-  exec(cmd, { maxBuffer: 1024 * 1024 * 5, timeout: 30000 }, (error, stdout) => {
-    if (error) {
-      console.error('Download error:', error.message);
-      // Fallback
-      const fallback = `${YTDLP} ${FLAGS} -f "best" --get-url "${url}"`;
-      exec(fallback, { maxBuffer: 1024 * 1024 * 5, timeout: 30000 }, (err2, stdout2) => {
-        if (err2) {
-          console.error('Fallback error:', err2.message);
-          return res.status(500).json({ error: 'Download failed', details: err2.message });
-        }
-        const lines = stdout2.trim().split('\n').filter(l => l.trim() && l.startsWith('http'));
-        if (lines.length === 0) return res.status(500).json({ error: 'No URL found' });
-        console.log(`✅ Download URL ready (fallback)`);
-        res.json({ success: true, downloadUrl: lines[0] });
-      });
-      return;
+  // Try formats one by one
+  function tryFormat(index) {
+    if (index >= formats.length) {
+      return res.status(500).json({ error: 'No format available' });
     }
-    const lines = stdout.trim().split('\n').filter(l => l.trim() && l.startsWith('http'));
-    if (lines.length === 0) return res.status(500).json({ error: 'No URL found' });
-    console.log(`✅ Download URL ready`);
-    res.json({ success: true, downloadUrl: lines[0] });
-  });
+    const fmt = formats[index];
+    const cmd = `${YTDLP} ${FLAGS} -f "${fmt}" --get-url "${url}"`;
+    console.log(`Trying format: ${fmt}`);
+
+    exec(cmd, { maxBuffer: 1024*1024*5, timeout: 25000 }, (err, stdout) => {
+      if (err) {
+        console.log(`Format ${fmt} failed, trying next...`);
+        return tryFormat(index + 1);
+      }
+      const lines = stdout.trim().split('\n').filter(l => l.trim() && l.startsWith('http'));
+      if (lines.length === 0) {
+        console.log(`Format ${fmt} no URL, trying next...`);
+        return tryFormat(index + 1);
+      }
+      console.log(`✅ Download URL ready with format: ${fmt}`);
+      res.json({ success: true, downloadUrl: lines[0] });
+    });
+  }
+
+  tryFormat(0);
 });
 
-// ─── START ────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`
   ╔══════════════════════════════════════╗
-  ║   NexGenGold Server v3.2 🔥          ║
+  ║   NexGenGold Server v3.3 🔥          ║
   ║   Port: ${PORT}                         ║
-  ║   Search:   YouTube API v3 ✅        ║
-  ║   Trending: YouTube API v3 ✅        ║
-  ║   Download: yt-dlp + cookies ✅      ║
-  ╚══════════════════════════════════════╝
-  `);
+  ║   Search:   YouTube API ✅           ║
+  ║   Download: yt-dlp + auto format ✅  ║
+  ╚══════════════════════════════════════╝`);
 });
